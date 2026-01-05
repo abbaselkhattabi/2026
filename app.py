@@ -11,117 +11,130 @@ URL = "https://driouchcity.com/wp-json/wp/v2"
 USER = "ADMIN"
 PASS = st.secrets["WP_PASSWORD"]
 
-def add_watermark(base_image):
-    """إضافة شعار الموقع logo.png من المجلد الرئيسي"""
+# --- الدوال البرمجية ---
+
+@st.cache_data(ttl=600) # تحديث القائمة كل 10 دقائق
+def get_categories():
+    """جلب قائمة الأقسام من ووردبريس تلقائياً"""
     try:
-        if os.path.exists("logo.png"):
+        res = requests.get(f"{URL}/categories", auth=(USER, PASS), params={"per_page": 100})
+        if res.status_code == 200:
+            return {cat['name']: cat['id'] for cat in res.json()}
+    except:
+        return {"عام": 1}
+    return {"عام": 1}
+
+def add_watermark(base_image):
+    """إضافة الشعار المرفوع على GitHub"""
+    if os.path.exists("logo.png"):
+        try:
             logo = Image.open("logo.png").convert("RGBA")
             base_image = base_image.convert("RGBA")
             width, height = base_image.size
-            logo_w = int(width * 0.15)
+            logo_w = int(width * 0.18)
             w_percent = (logo_w / float(logo.size[0]))
             logo_h = int((float(logo.size[1]) * float(w_percent)))
             logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
-            base_image.paste(logo, (width - logo_w - 20, height - logo_h - 20), mask=logo)
+            base_image.paste(logo, (width - logo_w - 25, height - logo_h - 25), mask=logo)
             return base_image.convert("RGB")
-        return base_image
-    except:
-        return base_image
+        except: return base_image
+    return base_image
 
-def post_to_wp(img, t, c):
-    """رفع الصورة أولاً ثم نشر المقال لضمان الترابط والفقرات"""
+def post_to_wp(img, title, content, cat_id):
+    """رفع الصورة وربطها بالمقال"""
     buf = BytesIO()
-    img.save(buf, format="JPEG", quality=85)
+    img.save(buf, format="JPEG", quality=85, optimize=True)
     
-    # 1. رفع الصورة
-    res_m = requests.post(f"{URL}/media", 
-                         headers={"Content-Disposition":"attachment; filename=news_img.jpg","Content-Type":"image/jpeg"},
-                         auth=(USER, PASS), data=buf.getvalue())
+    # 1. رفع الصورة أولاً
+    media_res = requests.post(
+        f"{URL}/media", 
+        headers={"Content-Disposition": "attachment; filename=news.jpg", "Content-Type": "image/jpeg"},
+        auth=(USER, PASS), data=buf.getvalue()
+    )
     
-    if res_m.status_code == 201:
-        mid = res_m.json()['id']
-        # 2. حل مشكلة الفقرات (تحويل السطور إلى HTML)
-        html_content = "".join([f"<p style='text-align: right;'>{p}</p>" for p in c.split('\n') if p.strip()])
+    if media_res.status_code == 201:
+        media_id = media_res.json()['id']
+        # 2. تنسيق الفقرات (HTML)
+        html_content = "".join([f"<p style='text-align: right; direction: rtl;'>{p}</p>" for p in content.split('\n') if p.strip()])
         
-        # 3. نشر المقال
+        # 3. إنشاء المقال وربطه بالصورة
         payload = {
-            "title": t,
+            "title": title,
             "content": html_content,
-            "featured_media": mid,
+            "featured_media": media_id,
+            "categories": [cat_id],
             "status": "publish"
         }
-        res_p = requests.post(f"{URL}/posts", auth=(USER, PASS), json=payload)
-        return res_p.status_code == 201
+        post_res = requests.post(f"{URL}/posts", auth=(USER, PASS), json=payload)
+        return post_res.status_code == 201
     return False
 
 # --- واجهة التطبيق ---
-st.set_page_config(page_title="محرر الدريوش سيتي الذكي", page_icon="🗞️")
+st.set_page_config(page_title="محرر الدريوش سيتي", layout="wide")
 st.title("🗞️ محرر ونشر أخبار الدريوش سيتي")
 
-src = st.radio("مصدر الصورة:", ["رفع صورة من جهازي", "جلب من رابط مقال خارجي"], horizontal=True)
-raw = None
+# شريط جانبي للأقسام
+st.sidebar.header("📂 إعدادات الخبر")
+categories_dict = get_categories()
+selected_cat_name = st.sidebar.selectbox("اختر القسم:", list(categories_dict.keys()))
+selected_cat_id = categories_dict[selected_cat_name]
 
-if src == "رفع صورة من جهازي":
-    f = st.file_uploader("اختر ملف الصورة", type=["jpg","png","jpeg"])
-    if f: raw = Image.open(f)
-else:
-    u = st.text_input("ضع رابط المقال الإخباري هنا")
+# مصدر الصورة
+src = st.radio("مصدر الصورة:", ["رابط مباشر (لهسبريس)", "رفع من جهازي", "جلب من رابط مقال"], horizontal=True)
+raw_img = None
+headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/119.0.0.0 Safari/537.36'}
+
+if src == "رابط مباشر (لهسبريس)":
+    u = st.text_input("ضع رابط الصورة المباشر (.jpg / .webp)")
     if u:
         try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            with st.spinner("جاري استخراج الصورة من المقال..."):
-                response = requests.get(u, headers=headers, timeout=10)
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # البحث عن الصورة البارزة في المقال
-                img_tag = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "twitter:image"})
-                img_url = img_tag["content"] if img_tag else None
-                
-                if not img_url: # محاولة إيجاد أول صورة كبيرة إذا فشل الـ meta
-                    first_img = soup.find("img")
-                    if first_img: img_url = first_img.get("src")
+            res = requests.get(u, headers=headers)
+            raw_img = Image.open(BytesIO(res.content))
+        except: st.error("فشل جلب الرابط المباشر")
 
-                if img_url:
-                    img_url = urljoin(u, img_url) # توحيد الرابط
-                    res_img = requests.get(img_url, headers=headers)
-                    raw = Image.open(BytesIO(res_img.content))
-                    st.success("✅ تم العثور على الصورة بنجاح!")
-                else:
-                    st.error("لم نتمكن من العثور على صورة في هذا الرابط.")
-        except Exception as e:
-            st.error(f"خطأ في الوصول للرابط: {e}")
+elif src == "رفع من جهازي":
+    f = st.file_uploader("اختر صورة", type=["jpg", "png", "jpeg", "webp"])
+    if f: raw_img = Image.open(f)
 
-if raw:
+else:
+    u_art = st.text_input("ضع رابط المقال الإخباري")
+    if u_art:
+        try:
+            res = requests.get(u_art, headers=headers)
+            soup = BeautifulSoup(res.text, 'html.parser')
+            img_tag = soup.find("meta", property="og:image")
+            if img_tag:
+                img_res = requests.get(img_tag["content"], headers=headers)
+                raw_img = Image.open(BytesIO(img_res.content))
+            else: st.error("لم نجد صورة بارزة في المقال")
+        except: st.error("الموقع المصدر حظر عملية الجلب")
+
+if raw_img:
     st.divider()
     col1, col2 = st.columns([2, 1])
     
     with col2:
-        st.subheader("⚙️ تعديل الصورة")
+        st.subheader("⚙️ تعديلات")
         sat = st.slider("الألوان", 0.0, 2.0, 1.0)
         bri = st.slider("الإضاءة", 0.0, 2.0, 1.0)
         apply_logo = st.checkbox("إضافة شعار الموقع", value=True)
-        if st.button("قلب الصورة ↔️"): raw = ImageOps.mirror(raw)
-        
-    img = ImageEnhance.Color(raw).enhance(sat)
-    img = ImageEnhance.Brightness(img).enhance(bri)
-    if apply_logo:
-        img = add_watermark(img)
-        
-    with col1:
-        st.image(img, use_container_width=True, caption="معاينة نهائية")
+        if st.button("قلب الصورة ↔️"): raw_img = ImageOps.mirror(raw_img)
+    
+    # معالجة الصورة
+    proc_img = ImageEnhance.Color(raw_img).enhance(sat)
+    proc_img = ImageEnhance.Brightness(proc_img).enhance(bri)
+    if apply_logo: proc_img = add_watermark(proc_img)
+    
+    with col1: st.image(proc_img, use_container_width=True, caption="المعاينة النهائية")
 
     st.divider()
-    t_in = st.text_input("عنوان الخبر")
-    c_in = st.text_area("نص الخبر (استخدم Enter للفقرات)", height=250)
+    title_in = st.text_input("عنوان الخبر")
+    text_in = st.text_area("نص الخبر (استخدم Enter للفقرات)", height=250)
     
-    st.caption(f"عدد الكلمات: {len(c_in.split())}")
-
     if st.button("🚀 انشر الآن على الموقع"):
-        if t_in and c_in:
+        if title_in and text_in:
             with st.spinner("جاري النشر..."):
-                if post_to_wp(img, t_in, c_in):
-                    st.success("🎉 تم النشر بنجاح على DriouchCity.com")
-                else:
-                    st.error("❌ فشل النشر. تأكد من إعدادات الموقع وكلمة المرور.")
-        else:
-            st.warning("الرجاء إدخال العنوان والنص.")
+                if post_to_wp(proc_img, title_in, text_in, selected_cat_id):
+                    st.success("✅ تم النشر بنجاح مع الصورة البارزة في قسم: " + selected_cat_name)
+                else: st.error("❌ فشل النشر - تحقق من إعدادات الموقع")
+        else: st.warning("اكتب العنوان والنص أولاً")
