@@ -24,13 +24,13 @@ def add_watermark(base_image):
         except: return base_image
     return base_image
 
-def post_to_wp(img, title, h3_title, content):
-    # قلب الصورة إجبارياً
+def post_to_wp(img, title, h3_sub, content):
+    # 1. قلب الصورة إجبارياً (Mirror)
     img = ImageOps.mirror(img)
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=85)
     
-    # 1. رفع الصورة
+    # 2. رفع الصورة
     m_res = requests.post(f"{WP_URL}/media", 
                          headers={"Content-Disposition":"attachment; filename=news.jpg","Content-Type":"image/jpeg"},
                          auth=(WP_USER, WP_PASS), data=buf.getvalue())
@@ -38,13 +38,15 @@ def post_to_wp(img, title, h3_title, content):
     if m_res.status_code == 201:
         mid = m_res.json()['id']
         
-        # 2. بناء الـ HTML (الترويسة 3 منفصلة تماماً)
-        full_html = f"<h3 style='text-align: right; direction: rtl;'>{h3_title}</h3>"
-        for p in content.split('\n'):
-            if p.strip():
-                full_html += f"<p style='text-align: right; direction: rtl;'>{p.strip()}</p>"
+        # 3. هندسة النص: الفقرة الأولى -> العنوان الفرعي H3 -> باقي الفقرات
+        paragraphs = [p.strip() for p in content.split('\n') if p.strip()]
+        first_p = f"<p style='text-align: right; direction: rtl;'>{paragraphs[0]}</p>" if paragraphs else ""
+        h3_part = f"<h3 style='text-align: right; direction: rtl;'>{h3_sub}</h3>" if h3_sub else ""
+        rest_p = "".join([f"<p style='text-align: right; direction: rtl;'>{p}</p>" for p in paragraphs[1:]])
         
-        # 3. الإرسال كمسودة مع تصنيفات وسيو
+        full_html = first_p + h3_part + rest_p
+        
+        # 4. الإرسال كمسودة
         payload = {
             "title": title,
             "content": full_html,
@@ -61,49 +63,53 @@ def post_to_wp(img, title, h3_title, content):
     return False
 
 # --- الواجهة ---
-st.set_page_config(page_title="محرر الدريوش سيتي الكامل")
-st.title("🗞️ محرر الدريوش سيتي (المسودات)")
+st.set_page_config(page_title="محرر الدريوش سيتي برو", layout="wide")
+st.title("🗞️ محرر الدريوش سيتي المتطور")
 
-src = st.radio("مصدر الصورة:", ["رفع مباشر", "من رابط"], horizontal=True)
+up_file = st.file_uploader("اختر صورة الخبر", type=["jpg","png","jpeg"])
 raw = None
-headers = {'User-Agent': 'Mozilla/5.0'}
 
-if src == "رفع مباشر":
-    f = st.file_uploader("اختر صورة", type=["jpg","png","jpeg"])
-    if f: raw = Image.open(f)
-else:
-    u = st.text_input("ضع رابط الصورة المباشر")
-    if u:
-        try:
-            res = requests.get(u, headers=headers)
-            raw = Image.open(BytesIO(res.content))
-        except: st.error("لا يمكن جلب الصورة من هذا الرابط")
+if up_file:
+    raw = Image.open(up_file)
 
 if raw:
     st.divider()
-    col1, col2 = st.columns([2, 1])
-    with col2:
-        st.subheader("⚙️ تعديلات")
+    col_tools, col_view = st.columns([1, 1.5])
+    
+    with col_tools:
+        st.subheader("🛠️ أدوات التعديل")
+        
+        # ميزة القص (Crop)
+        width, height = raw.size
+        st.write(f"المقاس الحالي: {width}x{height}")
+        left = st.number_input("القص من اليسار", 0, width, 0)
+        top = st.number_input("القص من الأعلى", 0, height, 0)
+        right = st.number_input("القص من اليمين", 0, width, width)
+        bottom = st.number_input("القص من الأسفل", 0, height, height)
+        
+        # الألوان والإضاءة
         sat = st.slider("تشبع الألوان", 0.0, 2.0, 1.0)
         bri = st.slider("الإضاءة", 0.0, 2.0, 1.0)
         apply_logo = st.checkbox("إضافة اللوغو", value=True)
     
-    # معالجة الصورة (قلب المعاينة للتوضيح)
-    img_edit = ImageEnhance.Color(raw).enhance(sat)
+    # تطبيق العمليات
+    img_edit = raw.crop((left, top, right, bottom))
+    img_edit = ImageEnhance.Color(img_edit).enhance(sat)
     img_edit = ImageEnhance.Brightness(img_edit).enhance(bri)
     if apply_logo: img_edit = add_watermark(img_edit)
     
-    with col1:
-        st.image(ImageOps.mirror(img_edit), caption="معاينة الصورة (مقلوبة تلقائياً)")
+    with col_view:
+        # عرض المعاينة مقلوبة للتأكيد
+        st.image(ImageOps.mirror(img_edit), caption="معاينة نهائية (مقلوبة إجبارياً)")
 
     st.divider()
-    t_main = st.text_input("1️⃣ العنوان الرئيسي (يظهر في القائمة)")
-    t_h3 = st.text_input("2️⃣ العنوان الفرعي (سيظهر كـ H3 في بداية المقال)")
-    t_body = st.text_area("3️⃣ نص الخبر (فقرات عادية)", height=250)
+    t_main = st.text_input("عنوان المقال")
+    t_h3 = st.text_input("العنوان الفرعي (H3) - سيظهر بعد الفقرة الأولى")
+    t_body = st.text_area("نص المقال (اكتب الفقرة الأولى أولاً ثم البقية)", height=300)
 
-    if st.button("🚀 إرسال المسودة للموقع"):
+    if st.button("🚀 حفظ كمسودة احترافية"):
         if t_main and t_body:
-            with st.spinner("جاري النشر كمسودة..."):
+            with st.spinner("جاري الإرسال..."):
                 if post_to_wp(img_edit, t_main, t_h3, t_body):
-                    st.success("✅ تم الحفظ في المسودات (الرئيسية والدريوش) بنجاح!")
-                else: st.error("❌ فشل الإرسال، تأكد من إعدادات الموقع.")
+                    st.success("✅ تم الحفظ بنجاح! السطر الأول نُشر كفقرة، ثم تلاه العنوان الفرعي، ثم باقي الخبر.")
+                else: st.error("❌ فشل الإرسال.")
